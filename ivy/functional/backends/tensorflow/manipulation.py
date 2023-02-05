@@ -1,13 +1,23 @@
-# For Review
 # global
-import ivy
 import math
-import tensorflow as tf
 from numbers import Number
 from typing import Union, Tuple, Optional, List, Sequence
 
+import tensorflow as tf
+
+# local
+import ivy
+
 # noinspection PyProtectedMember
+from ivy.func_wrapper import with_supported_dtypes, with_unsupported_dtypes
 from ivy.functional.ivy.manipulation import _calculate_out_shape
+from . import backend_version
+
+
+def _reshape_fortran_tf(x, shape):
+    if len(x.shape) > 0:
+        x = tf.transpose(x)
+    return tf.transpose(tf.reshape(x, shape[::-1]))
 
 
 # Array API Standard #
@@ -15,10 +25,10 @@ from ivy.functional.ivy.manipulation import _calculate_out_shape
 
 
 def concat(
-    xs: List[tf.Tensor],
+    xs: Union[Tuple[tf.Tensor, ...], List[tf.Tensor]],
     /,
     *,
-    axis: int = 0,
+    axis: Optional[int] = 0,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
     is_tuple = type(xs) is tuple
@@ -27,41 +37,40 @@ def concat(
         xs = list(xs)
     highest_dtype = xs[0].dtype
     for i in xs:
-        highest_dtype = tf.experimental.numpy.promote_types(highest_dtype, i.dtype)
+        highest_dtype = ivy.as_native_dtype(ivy.promote_types(highest_dtype, i.dtype))
 
     for i in range(len(xs)):
         if is_axis_none:
             xs[i] = tf.reshape(xs[i], -1)
-        xs[i] = tf.cast(xs[i], highest_dtype)
+        xs[i] = ivy.astype(xs[i], highest_dtype, copy=False).to_native()
     if is_axis_none:
         axis = 0
         if is_tuple:
             xs = tuple(xs)
-    ret = tf.concat(xs, axis)
-    return ret
+    return tf.concat(xs, axis)
 
 
 def expand_dims(
     x: Union[tf.Tensor, tf.Variable],
     /,
     *,
-    axis: Union[int, Tuple[int], List[int]] = 0,
-    out: Optional[tf.Tensor] = None,
+    axis: Union[int, Sequence[int]] = 0,
+    out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
     try:
         out_shape = _calculate_out_shape(axis, x.shape)
         ret = tf.reshape(x, shape=out_shape)
         return ret
     except tf.errors.InvalidArgumentError as error:
-        raise IndexError(error)
+        raise ivy.exceptions.IvyException(repr(error))
 
 
 def flip(
     x: Union[tf.Tensor, tf.Variable],
     /,
     *,
-    axis: Optional[Union[int, Tuple[int], List[int]]] = None,
-    out: Optional[tf.Tensor] = None,
+    axis: Optional[Union[int, Sequence[int]]] = None,
+    out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
     num_dims = len(x.shape)
     if not num_dims:
@@ -87,8 +96,7 @@ def permute_dims(
     *,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
-    ret = tf.transpose(x, perm=axes)
-    return ret
+    return tf.transpose(x, perm=axes)
 
 
 def reshape(
@@ -97,11 +105,23 @@ def reshape(
     shape: Union[ivy.NativeShape, Sequence[int]],
     *,
     copy: Optional[bool] = None,
-    out: Optional[tf.Tensor] = None,
+    order: Optional[str] = "C",
+    allowzero: Optional[bool] = True,
+    out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
+    ivy.assertions.check_elem_in_list(order, ["C", "F"])
+    if not allowzero:
+        shape = [
+            new_s if con else old_s
+            for new_s, con, old_s in zip(shape, tf.constant(shape) != 0, x.shape)
+        ]
     if copy:
         newarr = tf.experimental.numpy.copy(x)
+        if order == "F":
+            return _reshape_fortran_tf(newarr, shape)
         return tf.reshape(newarr, shape)
+    if order == "F":
+        return _reshape_fortran_tf(x, shape)
     return tf.reshape(x, shape)
 
 
@@ -129,16 +149,14 @@ def roll(
 def squeeze(
     x: Union[tf.Tensor, tf.Variable],
     /,
-    axis: Optional[Union[int, Tuple[int], List[int]]] = None,
+    axis: Union[int, Sequence[int]],
     *,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
     if isinstance(axis, int):
-        if x.shape[axis] > 1:
+        if ivy.any(x.shape[axis] > 1):
             raise ValueError(
-                "Expected dimension of size 1, but found dimension size {}".format(
-                    x.shape[axis]
-                )
+                "{} must be lesser than or equal to {}".format(x.shape[axis], 1)
             )
         ret = tf.squeeze(x, axis)
     elif axis is None:
@@ -167,15 +185,15 @@ def squeeze(
     return ret
 
 
+@with_unsupported_dtypes({"2.9.1 and below": ("bfloat16",)}, backend_version)
 def stack(
     arrays: Union[Tuple[tf.Tensor], List[tf.Tensor]],
     /,
     *,
-    axis: Optional[int] = 0,
+    axis: int = 0,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
-    ret = tf.experimental.numpy.stack(arrays, axis)
-    return ret
+    return tf.experimental.numpy.stack(arrays, axis)
 
 
 # Extra #
@@ -186,14 +204,13 @@ def split(
     x,
     /,
     *,
-    num_or_size_splits=None,
-    axis=0,
-    with_remainder=False,
-    out: Optional[Union[tf.Tensor, tf.Variable]] = None,
-):
+    num_or_size_splits: Optional[Union[int, Sequence[int]]] = None,
+    axis: Optional[int] = 0,
+    with_remainder: Optional[bool] = False,
+) -> List[tf.Tensor]:
     if x.shape == ():
         if num_or_size_splits is not None and num_or_size_splits != 1:
-            raise Exception(
+            raise ivy.exceptions.IvyException(
                 "input array had no shape, but num_sections specified was {}".format(
                     num_or_size_splits
                 )
@@ -201,7 +218,7 @@ def split(
         return [x]
     if num_or_size_splits is None:
         dim_size = tf.shape(x)[axis]
-        num_or_size_splits = dim_size
+        num_or_size_splits = int(dim_size)
     elif isinstance(num_or_size_splits, int) and with_remainder:
         num_chunks = x.shape[axis] / num_or_size_splits
         num_chunks_int = math.floor(num_chunks)
@@ -210,9 +227,11 @@ def split(
             num_or_size_splits = [num_or_size_splits] * num_chunks_int + [
                 int(remainder * num_or_size_splits)
             ]
+
     return tf.split(x, num_or_size_splits, axis)
 
 
+@with_supported_dtypes({"2.9.1 and below": ("int32", "int64")}, backend_version)
 def repeat(
     x: Union[tf.Tensor, tf.Variable],
     /,
@@ -221,34 +240,45 @@ def repeat(
     axis: int = None,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
-    ret = tf.repeat(x, repeats, axis)
-    return ret
+    return tf.repeat(x, repeats, axis)
 
 
-repeat.supported_dtypes = (
-    "int32",
-    "int64",
+@with_unsupported_dtypes(
+    {
+        "2.9.1 and below": (
+            "uint8",
+            "uint16",
+            "uint32",
+            "int8",
+            "int16",
+        )
+    },
+    backend_version,
 )
-
-
-def tile(x, /, reps, *, out: Optional[Union[tf.Tensor, tf.Variable]] = None):
+def tile(
+    x: Union[tf.Tensor, tf.Variable],
+    /,
+    repeats: Sequence[int],
+    *,
+    out: Optional[Union[tf.Tensor, tf.Variable]] = None,
+) -> Union[tf.Tensor, tf.Variable]:
     if x.shape == ():
         x = tf.reshape(x, (-1,))
-    if isinstance(reps, Number):
-        reps = [reps]
-    if isinstance(reps, tf.Tensor) and reps.shape == ():
-        reps = tf.reshape(reps, (-1,))
-    ret = tf.tile(x, reps)
-    return ret
-
-
-tile.unsupported_dtypes = (
-    "uint8",
-    "uint16",
-    "uint32",
-    "int8",
-    "int16",
-)
+    if isinstance(repeats, Number):
+        repeats = [repeats]
+    if isinstance(repeats, tf.Tensor) and repeats.shape == ():
+        repeats = tf.reshape(repeats, (-1,))
+    # code to unify behaviour with numpy and torch
+    if len(x.shape) < len(repeats):
+        while len(x.shape) != len(repeats):
+            x = tf.expand_dims(x, 0)
+    elif len(x.shape) > len(repeats):
+        repeats = list(repeats)
+        while len(x.shape) != len(repeats):
+            repeats = [1] + repeats
+    # TODO remove the unifying behaviour code if tensorflow handles this
+    # https://github.com/tensorflow/tensorflow/issues/58002
+    return tf.tile(x, repeats)
 
 
 def constant_pad(
@@ -256,15 +286,13 @@ def constant_pad(
 ):
     if x.shape == ():
         x = tf.reshape(x, (-1,))
-    ret = tf.pad(x, pad_width, constant_values=value)
-    return ret
+    return tf.pad(x, pad_width, constant_values=value)
 
 
 def zero_pad(x, /, pad_width, *, out: Optional[Union[tf.Tensor, tf.Variable]] = None):
     if x.shape == ():
         x = tf.reshape(x, (-1,))
-    ret = tf.pad(x, pad_width)
-    return ret
+    return tf.pad(x, pad_width)
 
 
 def swapaxes(
@@ -279,10 +307,10 @@ def swapaxes(
     config.insert(axis0, axis1)
     config.pop(axis1)
     config.insert(axis1, axis0)
-    ret = tf.transpose(x, config)
-    return ret
+    return tf.transpose(x, config)
 
 
+@with_unsupported_dtypes({"2.9.1 and below": ("complex",)}, backend_version)
 def clip(
     x: Union[tf.Tensor, tf.Variable],
     x_min: Union[Number, tf.Tensor, tf.Variable],
@@ -291,9 +319,12 @@ def clip(
     *,
     out: Optional[Union[tf.Tensor, tf.Variable]] = None,
 ) -> Union[tf.Tensor, tf.Variable]:
+    ivy.assertions.check_less(x_min, x_max, message="min values must be less than max")
     if hasattr(x_min, "dtype") and hasattr(x_max, "dtype"):
-        promoted_type = tf.experimental.numpy.promote_types(x.dtype, x_min.dtype)
-        promoted_type = tf.experimental.numpy.promote_types(promoted_type, x_max.dtype)
+        promoted_type = ivy.as_native_dtype(ivy.promote_types(x.dtype, x_min.dtype))
+        promoted_type = ivy.as_native_dtype(
+            ivy.promote_types(promoted_type, x_max.dtype)
+        )
         x = tf.cast(x, promoted_type)
         x_min = tf.cast(x_min, promoted_type)
         x_max = tf.cast(x_max, promoted_type)
@@ -304,4 +335,15 @@ def clip(
         ret = tf.cast(ret, x.dtype)
     else:
         ret = tf.clip_by_value(x, x_min, x_max)
+    return ret
+
+
+def unstack(
+    x: Union[tf.Tensor, tf.Variable], /, *, axis: int = 0, keepdims: bool = False
+) -> List[tf.Tensor]:
+    if x.shape == ():
+        return [x]
+    ret = tf.unstack(x, axis=axis)
+    if keepdims:
+        return [tf.expand_dims(r, axis) for r in ret]
     return ret

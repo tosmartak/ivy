@@ -1,49 +1,42 @@
 # global
-import numpy as np
-from hypothesis import given, strategies as st
+from hypothesis import strategies as st
 
 # local
 import ivy_tests.test_ivy.helpers as helpers
-import ivy.functional.backends.tensorflow as ivy_tf
+from ivy_tests.test_ivy.helpers import handle_frontend_test
 
 
-@st.composite
-def _get_dtype_and_matrix(draw):
-    arbitrary_dims = draw(helpers.get_shape(max_dim_size=5))
-    random_size = draw(st.integers(min_value=1, max_value=4))
-    shape = (*arbitrary_dims, random_size, random_size)
-    return draw(
-        helpers.dtype_and_values(
-            available_dtypes=ivy_tf.valid_float_dtypes,
-            shape=shape,
-            min_value=-10,
-            max_value=10,
-        )
-    )
-
-
-@given(
-    dtype_and_input=_get_dtype_and_matrix(),
-    as_variable=st.booleans(),
-    num_positional_args=helpers.num_positional_args(
-        fn_name="ivy.functional.frontends.tensorflow.ifftshift"
+# kaiser_window
+@handle_frontend_test(
+    fn_tree="tensorflow.signal.kaiser_window",
+    dtype_and_window_length=helpers.dtype_and_values(
+        available_dtypes=helpers.get_dtypes("integer")
     ),
-    native_array=st.booleans(),
+    dtype_and_beta=helpers.dtype_and_values(
+        available_dtypes=helpers.get_dtypes("numeric")
+    ),
+    dtype=helpers.get_dtypes("numeric"),
+    test_with_out=st.just(False),
 )
-def test_tensorflow_ifftshift(
-    dtype_and_input, as_variable, num_positional_args, native_array, fw
+def test_tensorflow_kaiser_window(
+    *,
+    dtype_and_window_length,
+    dtype_and_beta,
+    dtype,
+    frontend,
+    test_flags,
+    fn_tree,
+    on_device,
 ):
-    input_dtype, x = dtype_and_input
+    window_length_dtype, window_length = dtype_and_window_length
+    beta_dtype, beta = dtype_and_beta
     helpers.test_frontend_function(
-        input_dtypes=input_dtype,
-        as_variable_flags=as_variable,
-        with_out=False,
-        num_positional_args=num_positional_args,
-        native_array_flags=native_array,
-        fw=fw,
-        frontend="tensorflow",
-        fn_tree="signal.ifftshift",
-        input=np.asarray(x, dtype=input_dtype),
+        input_dtypes=[window_length_dtype[0], beta_dtype[0]],
+        frontend=frontend,
+        test_flags=test_flags,
+        fn_tree=fn_tree,
+        on_device=on_device,
+        window_length=window_length,
+        beta=beta,
+        dtype=dtype,
     )
-
-    
